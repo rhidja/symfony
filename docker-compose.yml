@@ -1,0 +1,157 @@
+version: '3.4'
+
+services:
+    php:
+        container_name: app_php
+        build:
+            context: ./
+            dockerfile: ./docker/php/Dockerfile
+            target: app_php
+        depends_on:
+            - mysql
+        env_file:
+            .env
+        environment:
+            - PHP_DATE_TIMEZONE=${PHP_DATE_TIMEZONE:-UTC}
+            - XDEBUG_CONFIG="remote_host=host.docker.internal"
+        ports:
+            - "9000"  # PHP-FPM port
+            - "9004"  # Xdebug port, The 9004:9004 port mapping allows Xdebug to communicate with PhpStorm.
+        extra_hosts:
+            - host.docker.internal:host-gateway
+        volumes:
+            - ./app:/srv/app:rw,cached
+            - ~/.composer:/.composer  # for Composer cache
+
+    mysql:
+        container_name: app_mysql
+        hostname: mysql
+        build:
+            context: ./
+            dockerfile: ./docker/mysql/Dockerfile
+            target: app_mysql
+        env_file:
+            .env
+        environment:
+            - MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD:-nopassword}
+            - MYSQL_DATABASE=${MYSQL_DATABASE:-app}
+            - MYSQL_USER=${MYSQL_USER:-app}
+            - MYSQL_PASSWORD=${MYSQL_PASSWORD:-nopassword}
+        volumes:
+            - ./app:/srv/app:rw,cached
+            - mysql-data:/var/lib/mysql:rw
+        ports:
+            - "3307:3306"
+
+    adminer:
+        container_name: app_adminer
+        depends_on:
+            - mysql
+        image: adminer
+        ports:
+            - "8089:8080"
+        labels:
+            - "traefik.enable=true"
+            - "traefik.docker.network=app"
+            - "traefik.http.routers.adminer.entrypoints=https"
+            - "traefik.http.routers.adminer.rule=Host(`adminer.docker.localhost`)"
+            - "traefik.http.routers.adminer.tls=true"
+        networks:
+            default:
+            app:
+                aliases:
+                    - "adminer.docker.localhost"
+
+    nodejs:
+        container_name: app_nodejs
+        build:
+            context: ./
+            dockerfile: ./docker/nodejs/Dockerfile
+            target: app_nodejs
+        depends_on:
+            - php
+        env_file:
+            .env
+        environment:
+            - GULP_ENV=dev
+            - PHP_HOST=php
+            - PHP_PORT=9000
+        volumes:
+            - ./app:/srv/app:rw,cached
+            - ./app/public:/srv/app/public:rw,delegated
+            - ~/.cache:/home/node/.cache
+            - ~/.yarn:/home/node/.yarn
+        ports:
+            - "35730:35729"
+
+    nginx:
+        container_name: app_nginx
+        build:
+            context: ./
+            dockerfile: ./docker/nginx/Dockerfile
+            target: app_nginx
+        depends_on:
+            - php
+            - nodejs # to ensure correct build order
+        security_opt:
+            - no-new-privileges:true
+        volumes:
+            - ./app/public:/srv/app/public:ro
+        extra_hosts:
+            - "host.docker.internal:host-gateway"
+        labels:
+            - "traefik.enable=true"
+            - "traefik.docker.network=app"
+            - "traefik.http.routers.app.entrypoints=https"
+            - "traefik.http.routers.app.rule=Host(`app.docker.localhost`)"
+            - "traefik.http.routers.app.tls=true"
+        networks:
+            default:
+            app:
+                aliases:
+                    - "app.docker.localhost"
+
+    mailer:
+        container_name: app_mailer
+        # do not use in production!
+        image: schickling/mailcatcher
+        ports:
+            - "1025:1025"
+            - "1080:1080"
+        labels:
+            - "traefik.enable=true"
+            - "traefik.docker.network=app"
+            - "traefik.http.routers.mailer.entrypoints=https"
+            - "traefik.http.routers.mailer.rule=Host(`mailer.docker.localhost`)"
+            - "traefik.http.routers.mailer.tls=true"
+            - "traefik.http.services.mailer.loadbalancer.server.port=1080"
+        networks:
+            default:
+            app:
+                aliases:
+                    - "mailer.docker.localhost"
+
+    traefik-proxy:
+        image: traefik:v2.5
+        container_name: app_traefik
+        restart: unless-stopped
+        hostname: traefik
+        security_opt:
+            - no-new-privileges:true
+        ports:
+            - 80:80
+            - 443:443
+        volumes:
+            - /var/run/docker.sock:/var/run/docker.sock:ro
+            - ./docker/traefik/config/static.yml:/etc/traefik/traefik.yml:ro
+            - ./docker/traefik/config/dynamic.yml:/etc/traefik/dynamic.yml:ro
+        networks:
+            - app
+
+volumes:
+    mysql-data:
+
+networks:
+    default:
+    app:
+        external: true
